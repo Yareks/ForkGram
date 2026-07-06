@@ -1,0 +1,147 @@
+name: Build ForkGram Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build ForkGram arm64-v8a Debug
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Add swap (8GB)
+        run: |
+          free -h
+          sudo dd if=/dev/zero of=/swap bs=1M count=8192 2>/dev/null || true
+          sudo chmod 600 /swap 2>/dev/null || true
+          sudo mkswap /swap 2>/dev/null || true
+          sudo swapon /swap 2>/dev/null || true
+          free -h
+
+      - name: Checkout forkgram source
+        run: |
+          git clone --depth=1 --branch dev \
+            https://github.com/forkgram/TelegramAndroid.git src
+          cd src
+          git submodule update --init --depth=1 \
+            TMessagesProj/jni/libwebp \
+            TMessagesProj/jni/dav1d \
+            TMessagesProj/jni/tde2e_source
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install ccache
+        run: sudo apt-get install -y ccache
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-forkgram-arm64-${{ github.sha }}
+          restore-keys: |
+            ccache-forkgram-arm64-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=10G
+          ccache --set-config=compiler_check="%compiler% -dumpmachine; %compiler% -dumpversion"
+          ccache --set-config=hash_dir=false
+          ccache --set-config=hard_link=true
+          ccache -z
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Set up Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "build-tools;35.0.0 ndk;27.2.12479018 platforms;android-35"
+
+      - name: Configure Gradle properties
+        run: |
+          mkdir -p ~/.gradle
+          cat >> ~/.gradle/gradle.properties << 'GEOF'
+          org.gradle.caching=true
+          org.gradle.parallel=true
+          org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8 -XX:+UseParallelGC
+          android.native.buildOutput=verbose
+          GEOF
+
+      - name: Configure local.properties
+        working-directory: src
+        run: |
+          cat > local.properties << EOF
+          sdk.dir=$ANDROID_SDK_ROOT
+          APP_ID=${{ secrets.API_ID }}
+          APP_HASH=${{ secrets.API_HASH }}
+          EOF
+
+      - name: Configure gradle.properties (API credentials)
+        working-directory: src
+        run: |
+          sed -i "s/^APP_ID=.*/APP_ID=${{ secrets.API_ID }}/" gradle.properties
+          sed -i "s/^APP_HASH=.*/APP_HASH=${{ secrets.API_HASH }}/" gradle.properties
+          grep "APP_ID\|APP_HASH" gradle.properties
+
+      - name: Place google-services.json
+        working-directory: src
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 --decode > TMessagesProj_App/google-services.json
+          python3 -c "
+          import json
+          d=json.load(open('TMessagesProj_App/google-services.json'))
+          for c in d['client']:
+              print('pkg:', c['client_info']['android_client_info']['package_name'])
+          "
+
+      - name: Set up ccache for NDK
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          ln -sf $(which ccache) "$HOME/.local/bin/clang"
+          ln -sf $(which ccache) "$HOME/.local/bin/clang++"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Build arm64-v8a Debug APK (forkTest flavor)
+        working-directory: src
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.2.12479018
+        run: |
+          ./gradlew :TMessagesProj_App:assembleForkTestDebug \
+            --no-daemon
+
+      - name: Show ccache stats
+        if: always()
+        run: ccache -s
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-forkgram-arm64-${{ github.sha }}
+
+      - name: Find and collect APKs
+        run: |
+          mkdir -p apk-output
+          find src -name "*.apk" | grep -v "\.gradle" | while read f; do
+            echo "Found: $f ($(du -sh "$f" | cut -f1))"
+            cp "$f" apk-output/
+          done
+          ls -lh apk-output/ || echo "No APKs found"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForkGram-debug-arm64-v8a
+          path: apk-output/*.apk
+          retention-days: 30
+          if-no-files-found: error
