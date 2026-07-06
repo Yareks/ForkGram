@@ -14,7 +14,6 @@ jobs:
     steps:
       - name: Add swap (8GB)
         run: |
-          free -h
           sudo dd if=/dev/zero of=/swap bs=1M count=8192 2>/dev/null || true
           sudo chmod 600 /swap 2>/dev/null || true
           sudo mkswap /swap 2>/dev/null || true
@@ -33,8 +32,8 @@ jobs:
             https://github.com/forkgram/TelegramAndroid.git src
           cd src
           git submodule update --init --depth=1 \
-            TMessagesProj/jni/libwebp \
             TMessagesProj/jni/dav1d \
+            TMessagesProj/jni/libwebp \
             TMessagesProj/jni/tde2e_source
 
       - name: Set up JDK 17
@@ -64,10 +63,18 @@ jobs:
         with:
           cache-read-only: false
 
-      - name: Set up Android SDK + NDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "build-tools;35.0.0 ndk;27.2.12479018 platforms;android-35"
+          packages: "build-tools;35.0.0 platforms;android-35"
+
+      - name: Install NDK r21e (supports API 16)
+        run: |
+          NDK_VERSION="21.4.7075529"
+          sdkmanager "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> $GITHUB_ENV
+          echo "NDK_VERSION=${NDK_VERSION}" >> $GITHUB_ENV
+          ls $ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/ | grep "arm" | head -5
 
       - name: Configure Gradle properties
         run: |
@@ -79,7 +86,7 @@ jobs:
           android.native.buildOutput=verbose
           GEOF
 
-      - name: Configure API credentials in gradle.properties
+      - name: Configure API credentials
         working-directory: src
         run: |
           sed -i "s/^APP_ID=.*/APP_ID=${{ secrets.API_ID }}/" gradle.properties
@@ -91,6 +98,7 @@ jobs:
         run: |
           cat > local.properties << EOF
           sdk.dir=$ANDROID_SDK_ROOT
+          NATIVE_DEPS_NDK_DIR=${{ env.ANDROID_NDK_HOME }}
           EOF
 
       - name: Place google-services.json
@@ -98,10 +106,8 @@ jobs:
         run: |
           echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 --decode > TMessagesProj_App/google-services.json
           python3 -c "
-          import json
-          d=json.load(open('TMessagesProj_App/google-services.json'))
-          for c in d['client']:
-              print('pkg:', c['client_info']['android_client_info']['package_name'])
+          import json; d=json.load(open('TMessagesProj_App/google-services.json'))
+          for c in d['client']: print('pkg:', c['client_info']['android_client_info']['package_name'])
           "
 
       - name: Set up ccache for NDK
@@ -111,12 +117,19 @@ jobs:
           ln -sf $(which ccache) "$HOME/.local/bin/clang++"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      - name: Patch prepare.py to build arm64 only
+        working-directory: src/TMessagesProj/jni
+        run: |
+          # Меняем вызов buildNativeDeps с 'arm arm64' на 'arm64'
+          sed -i "s/'python3', 'prepare.py', 'silent', 'ndk=' + ndkDir, 'arm', 'arm64'/'python3', 'prepare.py', 'silent', 'ndk=' + ndkDir, 'arm64'/" \
+            ../../build.gradle || true
+          grep "prepare.py" ../../build.gradle
+
       - name: Build arm64-v8a Debug APK
         working-directory: src
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.2.12479018
         run: |
           ./gradlew :TMessagesProj_App:assembleForkTestDebug \
+            -PNATIVE_DEPS_NDK_DIR="${{ env.ANDROID_NDK_HOME }}" \
             --no-daemon
 
       - name: Show ccache stats
@@ -134,10 +147,10 @@ jobs:
         run: |
           mkdir -p apk-output
           find src -name "*.apk" | grep -v "\.gradle" | while read f; do
-            echo "Found: $f  $(du -sh "$f" | cut -f1)"
+            echo "Found: $f  ($(du -sh "$f" | cut -f1))"
             cp "$f" apk-output/
           done
-          ls -lh apk-output/ || echo "No APKs"
+          ls -lh apk-output/ || echo "No APKs found"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
