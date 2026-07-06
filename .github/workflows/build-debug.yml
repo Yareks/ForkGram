@@ -21,6 +21,12 @@ jobs:
           sudo swapon /swap 2>/dev/null || true
           free -h
 
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ccache ninja-build nasm yasm
+          pip install meson
+
       - name: Checkout forkgram source
         run: |
           git clone --depth=1 --branch dev \
@@ -36,9 +42,6 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-
-      - name: Install ccache
-        run: sudo apt-get install -y ccache
 
       - name: Restore ccache
         uses: actions/cache/restore@v4
@@ -76,21 +79,19 @@ jobs:
           android.native.buildOutput=verbose
           GEOF
 
-      - name: Configure local.properties
-        working-directory: src
-        run: |
-          cat > local.properties << EOF
-          sdk.dir=$ANDROID_SDK_ROOT
-          APP_ID=${{ secrets.API_ID }}
-          APP_HASH=${{ secrets.API_HASH }}
-          EOF
-
-      - name: Configure gradle.properties (API credentials)
+      - name: Configure API credentials in gradle.properties
         working-directory: src
         run: |
           sed -i "s/^APP_ID=.*/APP_ID=${{ secrets.API_ID }}/" gradle.properties
           sed -i "s/^APP_HASH=.*/APP_HASH=${{ secrets.API_HASH }}/" gradle.properties
           grep "APP_ID\|APP_HASH" gradle.properties
+
+      - name: Configure local.properties
+        working-directory: src
+        run: |
+          cat > local.properties << EOF
+          sdk.dir=$ANDROID_SDK_ROOT
+          EOF
 
       - name: Place google-services.json
         working-directory: src
@@ -110,7 +111,7 @@ jobs:
           ln -sf $(which ccache) "$HOME/.local/bin/clang++"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Build arm64-v8a Debug APK (forkTest flavor)
+      - name: Build arm64-v8a Debug APK
         working-directory: src
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.2.12479018
@@ -129,14 +130,14 @@ jobs:
           path: ~/.ccache
           key: ccache-forkgram-arm64-${{ github.sha }}
 
-      - name: Find and collect APKs
+      - name: Collect APKs
         run: |
           mkdir -p apk-output
           find src -name "*.apk" | grep -v "\.gradle" | while read f; do
-            echo "Found: $f ($(du -sh "$f" | cut -f1))"
+            echo "Found: $f  $(du -sh "$f" | cut -f1)"
             cp "$f" apk-output/
           done
-          ls -lh apk-output/ || echo "No APKs found"
+          ls -lh apk-output/ || echo "No APKs"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
